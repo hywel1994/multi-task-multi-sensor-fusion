@@ -5,6 +5,7 @@ import time
 import argparse
 import random
 from torch.multiprocessing import Pool
+import os
 
 from loss import CustomLoss
 from datagen import get_data_loader
@@ -385,8 +386,10 @@ if __name__ == "__main__":
     parser.add_argument('--device', default='cpu', help='device to train on')
     parser.add_argument('--eval_range', type=int, help="range of evaluation")
     parser.add_argument('--test_id', type=int, default=0, help="id of the image to test")
+    parser.add_argument('--gpu', type=int, default=0, help="id of the gpu")
     args = parser.parse_args()
 
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
 
     device = torch.device(args.device)
     if not torch.cuda.is_available():

@@ -162,9 +162,10 @@ class BevBackBone(nn.Module):
         return p3
     
     def bev_image_fusion(self, y, x2y):
-        # y: image feature map -1, 256, 93, 310
+        # y: image feature map -1, 128, 93, 310
         # x2y: knn input map -1, 256, 224, 16, k, 2
-        # return: 256, 224, 16, 128
+        # return: 256, 224, 256
+        assert list(y.size())[1:] == [128,93,310]
         batch_size = y.size()[0]
         y = y.permute(0, 2, 3, 1)
         # TODO can be better
