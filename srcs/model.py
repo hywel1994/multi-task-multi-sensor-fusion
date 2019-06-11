@@ -168,8 +168,8 @@ class BevBackBone(nn.Module):
         batch_size = y.size()[0]
         y = y.permute(0, 2, 3, 1)
         # TODO can be better
-        x2y[:,:,:,:,0] = torch.clamp(x2y[:,:,:,:,0], 0, 92)
-        x2y[:,:,:,:,1] = torch.clamp(x2y[:,:,:,:,1], 0, 309)
+        x2y[:,:,:,:,:,0] = torch.clamp(x2y[:,:,:,:,:,0], 0, 92)
+        x2y[:,:,:,:,:,1] = torch.clamp(x2y[:,:,:,:,:,1], 0, 309)
         x2y = torch.round(x2y)
         x2y = x2y.view(batch_size,-1,2)
         x2y = x2y.long()
@@ -514,7 +514,7 @@ def test_decoder(decode = True):
     net = PIXOR(geom, use_bn=False)
     net.set_decode(decode)
     preds = net(torch.autograd.Variable(torch.randn(2, 33, 512, 448)), torch.autograd.Variable(torch.randn(2, 3, 370, 1240)), torch.autograd.Variable(torch.randn(2, 256, 224, 16, 2,2)))
-    #print(net)
+    print(net)
 
     print("Predictions output size", preds.size())
 

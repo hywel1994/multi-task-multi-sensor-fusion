@@ -62,6 +62,8 @@ class KITTI(Dataset):
         scan = torch.from_numpy(scan)
         bev2image = torch.from_numpy(bev2image)
         label_map = torch.from_numpy(label_map)
+        image = image.float()
+        bev2image = bev2image.float()
         image = image.permute(2, 0, 1)
         scan = scan.permute(2, 0, 1)
         label_map = label_map.permute(2, 0, 1)
@@ -107,7 +109,7 @@ class KITTI(Dataset):
         img_file = self.image[item]
         assert os.path.exists(img_file)
         image = cv2.imread(img_file)
-        image = cv2.resize(image, (370, 1240), interpolation=cv2.INTER_CUBIC)
+        image = cv2.resize(image, (1240, 370), interpolation=cv2.INTER_CUBIC)
         return image
     
     def load_calib(self, item):
@@ -450,6 +452,10 @@ def test():
         print("bev2image shape", bev2image.shape)
         print("image shape", image.shape)
         print("Label Map shape", label_map.shape)
+        print("Input type():", scan.type())
+        print("bev2image type()", bev2image.type())
+        print("image type()", image.type())
+        print("Label Map type()", label_map.type())
         if i == 20:
             break
     print("average preprocess time per image", np.mean(times)/batch_size)    
