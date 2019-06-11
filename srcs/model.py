@@ -111,16 +111,18 @@ class BevBackBone(nn.Module):
         self.deconv2 = nn.ConvTranspose2d(128, 96, kernel_size=3, stride=2, padding=1, output_padding=1)
 
         # MLP
-        self.squeeze_fusion = nn.Conv2d(2048, 256, kernel_size=1, stride=1)
+        # 2096 = 16*(128+3)
+        self.squeeze_fusion = nn.Conv2d(2096, 256, kernel_size=1, stride=1)
         self.mlp2 = self._make_mlp(256, 96)
         self.mlp3 = self._make_mlp(256, 192)
         self.mlp4 = self._make_mlp(256, 256)
         self.mlp5 = self._make_mlp(256, 384)
         
-    def forward(self, x, y, x2y):
+    def forward(self, x, y, x2y, pc_diff):
         # x: bev input
         # y: image feature map 93, 310
         # x2y: knn input map 256, 224, k, 2
+        # pc_diff: the diff between knn point and center  256, 224, k, 3
         
         x = self.conv1(x)
         if self.use_bn:
@@ -133,7 +135,8 @@ class BevBackBone(nn.Module):
         c1 = self.relu2(x)
 
         if self.fusion:
-            image_feature = self.bev_image_fusion(y, x2y)
+            image_feature = self.bev_image_fusion(y, x2y, pc_diff)
+
             # bottom up layers
             c2 = self.block2(c1)+self.mlp2(image_feature)
             #print ("m2", m2.size())
@@ -161,7 +164,7 @@ class BevBackBone(nn.Module):
 
         return p3
     
-    def bev_image_fusion(self, y, x2y):
+    def bev_image_fusion(self, y, x2y, pc_diff):
         # y: image feature map -1, 128, 93, 310
         # x2y: knn input map -1, 256, 224, 16, k, 2
         # return: 256, 224, 256
@@ -185,6 +188,7 @@ class BevBackBone(nn.Module):
                 y_bev = torch.cat((y_bev, z), 0)
         if True:
             y_bev = y_bev.view(batch_size, 256, 224, 16, -1 ,128)
+            y_bev = torch.cat((y_bev, pc_diff), 5)
             y_bev = torch.mean(y_bev, 4).squeeze(4)
             y_bev = y_bev.view(batch_size, 256, 224, -1)
             y_bev = y_bev.permute(0, 3, 1, 2)
@@ -466,7 +470,7 @@ class PIXOR(nn.Module):
     def set_decode(self, decode):
         self.use_decode = decode
 
-    def forward(self, x, y, x2y):
+    def forward(self, x, y, x2y, pc_diff):
         # x: lidar 
         # y: image
         # x2y: bev to image
@@ -480,7 +484,7 @@ class PIXOR(nn.Module):
         features_iamge = self.resnet(y)
         print (features_iamge.shape)
 
-        features = self.backbone(x, features_iamge, x2y)
+        features = self.backbone(x, features_iamge, x2y, pc_diff)
         
         cls, reg = self.header(features)
         self.cam_fov_mask = self.cam_fov_mask.to(device)
@@ -514,7 +518,10 @@ def test_decoder(decode = True):
     print("Testing PIXOR decoder")
     net = PIXOR(geom, use_bn=False)
     net.set_decode(decode)
-    preds = net(torch.autograd.Variable(torch.randn(2, 33, 512, 448)), torch.autograd.Variable(torch.randn(2, 3, 370, 1240)), torch.autograd.Variable(torch.randn(2, 256, 224, 16, 2,2)))
+    preds = net(torch.autograd.Variable(torch.randn(2, 33, 512, 448)), 
+                                        torch.autograd.Variable(torch.randn(2, 3, 370, 1240)), 
+                                        torch.autograd.Variable(torch.randn(2, 256, 224, 16, 2,2)), 
+                                        torch.autograd.Variable(torch.randn(2, 256, 224, 16, 2, 3)))
     print(net)
 
     print("Predictions output size", preds.size())

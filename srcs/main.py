@@ -57,11 +57,11 @@ def eval_batch(config, net, loss_fn, loader, device, eval_range='all'):
     with torch.no_grad():
         for i, data in enumerate(loader):
             tic = time.time()
-            bev, image, bev2image, label_map, item = data
+            bev, image, bev2image, pc_diff, label_map, item = data
             bev = bev.to(device)
             label_map = label_map.to(device)
             tac = time.time()
-            predictions = net(bev, image, bev2image)
+            predictions = net(bev, image, bev2image, pc_diff)
             t_fwd += time.time() - tac
             loss, cls, loc = loss_fn(predictions, label_map)
             cls_loss += cls
@@ -220,7 +220,7 @@ def train(exp_name, device):
             net.set_decode(False)
         scheduler.step()
 
-        for bev, image, bev2image, label_map, item in train_data_loader:
+        for bev, image, bev2image, pc_diff, label_map, item in train_data_loader:
             
             tic = time.time()#print('step', step)
             bev = bev.to(device)
@@ -230,7 +230,7 @@ def train(exp_name, device):
             optimizer.zero_grad()
 
             # Forward
-            predictions = net(bev, image, bev2image)
+            predictions = net(bev, image, bev2image, pc_diff)
             loss, cls, loc = loss_fn(predictions, label_map)
             loss.backward()
             optimizer.step()
@@ -283,7 +283,7 @@ def train(exp_name, device):
 
 
 def eval_one(net, loss_fn, config, loader, image_id, device, plot=False, verbose=False):
-    bev, image, bev2image, label_map, image_id = loader.dataset[image_id]
+    bev, image, bev2image, pc_diff, label_map, image_id = loader.dataset[image_id]
     bev = bev.to(device)
     label_map, label_list = loader.dataset.get_label(image_id)
     loader.dataset.reg_target_transform(label_map)
@@ -291,7 +291,7 @@ def eval_one(net, loss_fn, config, loader, image_id, device, plot=False, verbose
 
     # Forward Pass
     t_start = time.time()
-    pred = net(bev.unsqueeze(0), image.unsqueeze(0), bev2image.unsqueeze(0))
+    pred = net(bev.unsqueeze(0), image.unsqueeze(0), bev2image.unsqueeze(0), pc_diff.unsqueeze(0))
     t_forward = time.time() - t_start
 
     loss, cls_loss, loc_loss = loss_fn(pred, label_map)

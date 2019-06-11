@@ -53,7 +53,7 @@ class KITTI(Dataset):
         calib = self.load_calib(item)
         point = self.load_velo_origin(item)
         scan = self.load_velo_scan(item)
-        bev2image = self.find_knn_image(calib, scan, point, k=1)
+        bev2image, pc_diff = self.find_knn_image(calib, scan, point, k=1)
 
         label_map, _ = self.get_label(item)
         self.reg_target_transform(label_map)
@@ -62,12 +62,14 @@ class KITTI(Dataset):
         scan = torch.from_numpy(scan)
         bev2image = torch.from_numpy(bev2image)
         label_map = torch.from_numpy(label_map)
+        pc_diff = torch.from_numpy(pc_diff)
         image = image.float()
         bev2image = bev2image.float()
+        pc_diff = pc_diff.float()
         image = image.permute(2, 0, 1)
         scan = scan.permute(2, 0, 1)
         label_map = label_map.permute(2, 0, 1)
-        return scan, image, bev2image, label_map, item
+        return scan, image, bev2image, pc_diff, label_map, item
 
     def reg_target_transform(self, label_map):
         '''
@@ -347,13 +349,13 @@ class KITTI(Dataset):
             
             k_nearest = np.reshape(k_nearest, (size[0], size[1], size[2],k,size[3]))
             k_nearest_image = self.velo_to_image(calib, k_nearest)
-            
+            k_dif = k_nearest - center[:,:,:,np.newaxis,:]
         except:
             print ('uninstall pcl')
             center = np.reshape(center, (size[0], size[1], size[2],1,size[3]))
             k_nearest_image = self.velo_to_image(calib, center)
-            
-        return k_nearest_image
+            k_dif = center - center
+        return k_nearest_image, k_dif
 
     
     def velo_to_image(self, calib, point):
@@ -442,7 +444,7 @@ def test():
     train_data_loader, val_data_loader = get_data_loader(batch_size, False)
     times = []
     tic = time.time()
-    for i, (scan, image, bev2image, label_map, item) in enumerate(train_data_loader):
+    for i, (scan, image, bev2image, pc_diff, label_map, item) in enumerate(train_data_loader):
         toc = time.time()
         print(toc - tic)
         times.append(toc-tic)
@@ -450,10 +452,12 @@ def test():
         print("Entry", i)
         print("Input shape:", scan.shape)
         print("bev2image shape", bev2image.shape)
+        print("pc_diff shape", pc_diff.shape)
         print("image shape", image.shape)
         print("Label Map shape", label_map.shape)
         print("Input type():", scan.type())
         print("bev2image type()", bev2image.type())
+        print("pc_diff type()", pc_diff.type())
         print("image type()", image.type())
         print("Label Map type()", label_map.type())
         if i == 20:
