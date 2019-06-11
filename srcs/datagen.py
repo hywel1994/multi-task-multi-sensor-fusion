@@ -25,9 +25,11 @@ class KITTI(Dataset):
         'W1': 0.0,
         'W2': 70.0,
         'H1': -2.5,
-        'H2': 1.0,
-        'input_shape': (800, 700, 36),
-        'label_shape': (200, 175, 7)
+        'H2': 2.5,
+        'interval': 0.15625,
+        'input_shape': (512, 448, 33),
+        'knn_shape': (256, 224, 16),
+        'label_shape': (128, 112, 7)
     }
 
     target_mean = np.array([0.008, 0.001, 0.202, 0.2, 0.43, 1.368])
@@ -48,17 +50,22 @@ class KITTI(Dataset):
 
     def __getitem__(self, item):
         image = self.load_image(item)
-        image = torch.from_numpy(image)
         calib = self.load_calib(item)
-        
+        point = self.load_velo_origin(item)
         scan = self.load_velo_scan(item)
-        scan = torch.from_numpy(scan)
+        bev2image = self.find_knn_image(calib, scan, point, k=1)
+
         label_map, _ = self.get_label(item)
         self.reg_target_transform(label_map)
+
+        image = torch.from_numpy(image)
+        scan = torch.from_numpy(scan)
+        bev2image = torch.from_numpy(bev2image)
         label_map = torch.from_numpy(label_map)
+        image = image.permute(2, 0, 1)
         scan = scan.permute(2, 0, 1)
         label_map = label_map.permute(2, 0, 1)
-        return scan, label_map, image, item
+        return scan, image, bev2image, label_map, item
 
     def reg_target_transform(self, label_map):
         '''
@@ -100,7 +107,7 @@ class KITTI(Dataset):
         img_file = self.image[item]
         assert os.path.exists(img_file)
         image = cv2.imread(img_file)
-        image = cv2.resize(image, (375, 1242), interpolation=cv2.INTER_CUBIC)
+        image = cv2.resize(image, (370, 1240), interpolation=cv2.INTER_CUBIC)
         return image
     
     def load_calib(self, item):
@@ -153,9 +160,8 @@ class KITTI(Dataset):
 
         return bev_corners, reg_target
 
-
     def update_label_map(self, map, bev_corners, reg_target):
-        label_corners = (bev_corners / 4 ) / 0.1
+        label_corners = (bev_corners / 4 ) / self.geometry['interval']
         label_corners[:, 1] += self.geometry['label_shape'][0] / 2
 
         points = get_points_in_a_rotated_box(label_corners, self.geometry['label_shape'])
@@ -172,7 +178,6 @@ class KITTI(Dataset):
 
             map[label_y, label_x, 0] = 1.0
             map[label_y, label_x, 1:7] = actual_reg_target
-
 
     def get_label(self, index):
         '''
@@ -230,6 +235,11 @@ class KITTI(Dataset):
             
         return scan
 
+    def load_velo_origin(self, item):
+        filename = self.velo[item]
+        scan = np.fromfile(filename, dtype=np.float32).reshape(-1, 4)
+        return scan
+
     def load_velo(self):
         """Load velodyne [x,y,z,reflectance] scan data from binary files."""
         # Find all the Velodyne files
@@ -272,13 +282,14 @@ class KITTI(Dataset):
         return velo[indices, :]
 
     def lidar_preprocess(self, scan):
+        # TODO 
         velo_processed = np.zeros(self.geometry['input_shape'], dtype=np.float32)
         intensity_map_count = np.zeros((velo_processed.shape[0], velo_processed.shape[1]))
         velo = self.passthrough(scan)
         for i in range(velo.shape[0]):
-            x = int((velo[i, 1]-self.geometry['L1']) / 0.1)
-            y = int((velo[i, 0]-self.geometry['W1']) / 0.1)
-            z = int((velo[i, 2]-self.geometry['H1']) / 0.1)
+            x = int((velo[i, 1]-self.geometry['L1']) / self.geometry['interval'])
+            y = int((velo[i, 0]-self.geometry['W1']) / self.geometry['interval'])
+            z = int((velo[i, 2]-self.geometry['H1']) / self.geometry['interval'])
             velo_processed[x, y, z] = 1
             velo_processed[x, y, -1] += velo[i, 3]
             intensity_map_count[x, y] += 1
@@ -288,9 +299,9 @@ class KITTI(Dataset):
     
     def bev_to_velo(self, x, y, z):
         scales = self.geometry['input_shape'][0]/self.geometry['knn_shape'][0]
-        l = (scales*x+0.5)*0.1 + self.geometry['L1']
-        w = (scales*y+0.5)*0.1 + self.geometry['W1']
-        h = (scales*z+0.5)*0.1 + self.geometry['H1']
+        l = (scales*x+0.5)*self.geometry['interval'] + self.geometry['L1']
+        w = (scales*y+0.5)*self.geometry['interval'] + self.geometry['W1']
+        h = (scales*z+0.5)*self.geometry['interval'] + self.geometry['H1']
         return w, l, h
     
     def cal_index_bev(self, x, y, z):
@@ -298,35 +309,57 @@ class KITTI(Dataset):
     
     def cal_index_velo(self, w, l ,h):
         scales = self.geometry['input_shape'][0]/self.geometry['knn_shape'][0]
-        x = round(((l-self.geometry['L1']) / 0.1-0.5)/scales)
-        y = round(((w-self.geometry['W1']) / 0.1-0.5)/scales)
-        z = round(((h-self.geometry['H1']) / 0.1-0.5)/scales)
+        x = round(((l-self.geometry['L1']) / self.geometry['interval']-0.5)/scales)
+        y = round(((w-self.geometry['W1']) / self.geometry['interval']-0.5)/scales)
+        z = round(((h-self.geometry['H1']) / self.geometry['interval']-0.5)/scales)
         return self.cal_index_bev(x, y, z)
     
-    
-    def bev_knn(self, scan, point, k=1):
+    def find_knn_image(self, calib, scan, point, k=1):
         point = point[:, 0:3]
-        shape = list(self.geometry['input_shape'])
-        shape.append(k*3)
-        center = np.zeros([self.geometry['knn_shape'][0],self.geometry['knn_shape'][1],self.geometry['knn_shape'][2],3])
-        scales = self.geometry['input_shape'][0]/self.geometry['knn_shape'][0]
-        l = []
-        w = []
-        h = []
-        for x in range(self.geometry['knn_shape'][0]):
-            l += [(scales*x+0.5)*0.1 + self.geometry['L1']]
-            
-        for y in range(self.geometry['knn_shape'][1]):
-            w += [(scales*y+0.5)*0.1 + self.geometry['W1']]
-            
-        for z in range(self.geometry['knn_shape'][2]):
-            h += [(scales*z+0.5)*0.1 + self.geometry['H1']]
         
-        import itertools
-        return list(itertools.product(w, l, h))
+        center = np.zeros([self.geometry['knn_shape'][0],self.geometry['knn_shape'][1],self.geometry['knn_shape'][2]])
+        itemindex = np.argwhere(center==0)
+        
+        scales = self.geometry['input_shape'][0]/self.geometry['knn_shape'][0]
+        itemindex[:,0] = (scales*itemindex[:,0]+0.5)*self.geometry['interval'] + self.geometry['L1']
+        itemindex[:,1] = (scales*itemindex[:,1]+0.5)*self.geometry['interval'] + self.geometry['W1']
+        itemindex[:,2] = (scales*itemindex[:,2]+0.5)*self.geometry['interval'] + self.geometry['H1']
+        itemindex[:,0],itemindex[:,1] = itemindex[:,1], itemindex[:,0]
+        center = np.reshape(itemindex, (self.geometry['knn_shape'][0],self.geometry['knn_shape'][1],self.geometry['knn_shape'][2],3))
+        size = center.shape
+        
+        try:
+            import pcl
+            
+            pc_point = pcl.PointCloud(point)
+            pc_center = pcl.PointCloud(itemindex)
+            kd = pc_point.make_kdtree_flann()
+            # find the single closest points to each point in point cloud 2
+            # (and the sqr distances)
+            indices, _ = kd.nearest_k_search_for_cloud(pc_center, k)
+            print ('indices', indices.shape)
+            print ('point', point.shape)
+            print ('center', center.shape)
+            indices = np.reshape(indices, (-1))
+            k_nearest = point[indices]
+            
+            k_nearest = np.reshape(k_nearest, (size[0], size[1], size[2],k,size[3]))
+            k_nearest_image = self.velo_to_image(calib, k_nearest)
+            
+        except:
+            print ('uninstall pcl')
+            center = np.reshape(center, (size[0], size[1], size[2],1,size[3]))
+            k_nearest_image = self.velo_to_image(calib, center)
+            
+        return k_nearest_image
+
     
     def velo_to_image(self, calib, point):
-        return calib.rect_to_img(point)
+        size = point.shape
+        point = np.reshape(point, (-1,3))
+        image, dis = calib.lidar_to_img(point)
+        image = np.reshape(image, (size[0], size[1], size[2],size[3], 2))
+        return image
 
 
 def get_data_loader(batch_size, use_npy, geometry=None, frame_range=10000):
@@ -407,13 +440,15 @@ def test():
     train_data_loader, val_data_loader = get_data_loader(batch_size, False)
     times = []
     tic = time.time()
-    for i, (input, label_map, image, item) in enumerate(train_data_loader):
+    for i, (scan, image, bev2image, label_map, item) in enumerate(train_data_loader):
         toc = time.time()
         print(toc - tic)
         times.append(toc-tic)
         tic = time.time()
         print("Entry", i)
-        print("Input shape:", input.shape)
+        print("Input shape:", scan.shape)
+        print("bev2image shape", bev2image.shape)
+        print("image shape", image.shape)
         print("Label Map shape", label_map.shape)
         if i == 20:
             break
@@ -423,7 +458,7 @@ def test():
 
 
 if __name__=="__main__":
-    #test()
-    preprocess_to_npy(True)
-    preprocess_to_npy(False)
+    test()
+    # preprocess_to_npy(True)
+    # preprocess_to_npy(False)
     # test0()

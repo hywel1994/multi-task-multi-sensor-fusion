@@ -1,0 +1,38 @@
+{
+  "name": "default",
+  "resume_training": false,
+
+  "batch_size": 6,
+  "learning_rate": 0.01,
+  "momentum": 0.9,
+  "weight_decay": 0.0001,
+  "alpha": 1.0,
+  "beta": 0.1,
+  "lr_decay_at": [20, 30],
+  "max_epochs": 40,
+  "save_every": 2,
+  "log_every": 100,
+
+  "use_bn": true,
+  "use_npy": false,
+  "mGPUs": false,
+  "frame_range": 10000,
+
+  "cls_threshold": 0.05,
+  "nms_iou_threshold": 0.1,
+  "nms_top": 128,
+
+  "geometry":{
+        "fusion": true,
+        "L1": -40.0,
+        "L2": 40.0,
+        "W1": 0.0,
+        "W2": 70.0,
+        "H1": -2.5,
+        "H2": 2.5,
+        "interval": 0.15625,
+        "input_shape": [512, 448, 33],
+        "knn_shape": [256, 224, 16],
+        "label_shape": [128, 112, 7]
+    }
+}
