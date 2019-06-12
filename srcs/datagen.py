@@ -14,8 +14,8 @@ import cv2
 import calibration as calibration
 
 #KITTI_PATH = '/home/hqxie/0249/Data/kitti'
-KITTI_PATH = '/home/hanqing.xie/DATA/kitti'
-#KITTI_PATH = 'KITTI'
+#KITTI_PATH = '/home/hanqing.xie/DATA/kitti'
+KITTI_PATH = 'KITTI'
 
 class KITTI(Dataset):
 
@@ -322,19 +322,25 @@ class KITTI(Dataset):
         point = point[:, 0:3]
         
         center = np.zeros([self.geometry['knn_shape'][0],self.geometry['knn_shape'][1],self.geometry['knn_shape'][2]])
+
         itemindex = np.argwhere(center==0)
+        itemindex = itemindex.astype(np.float32)
         
         scales = self.geometry['input_shape'][0]/self.geometry['knn_shape'][0]
         itemindex[:,0] = (scales*itemindex[:,0]+0.5)*self.geometry['interval'] + self.geometry['L1']
         itemindex[:,1] = (scales*itemindex[:,1]+0.5)*self.geometry['interval'] + self.geometry['W1']
         itemindex[:,2] = (scales*itemindex[:,2]+0.5)*self.geometry['interval'] + self.geometry['H1']
-        itemindex[:,0],itemindex[:,1] = itemindex[:,1], itemindex[:,0]
+        itemindex = itemindex[:,[1,0,2]]
+        #t = itemindex[:,0]
+        #itemindex[:,0] = itemindex[:,1]
+        #itemindex[:,1] = t
         center = np.reshape(itemindex, (self.geometry['knn_shape'][0],self.geometry['knn_shape'][1],self.geometry['knn_shape'][2],3))
         size = center.shape
         
         try:
             import pcl
-            
+            print ('itemindex', itemindex)
+            itemindex = itemindex.astype(np.float32)    
             pc_point = pcl.PointCloud(point)
             pc_center = pcl.PointCloud(itemindex)
             kd = pc_point.make_kdtree_flann()
@@ -371,12 +377,12 @@ def get_data_loader(batch_size, use_npy, geometry=None, frame_range=10000):
     if geometry is not None:
         train_dataset.geometry = geometry
     train_dataset.load_velo()
-    train_data_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=3)
+    train_data_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=0)
     val_dataset = KITTI(frame_range, use_npy=use_npy, train=False)
     if geometry is not None:
         val_dataset.geometry = geometry
     val_dataset.load_velo()
-    val_data_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size * 4, num_workers=8)
+    val_data_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size * 4, num_workers=0)
 
     print("------------------------------------------------------------------")
     return train_data_loader, val_data_loader
@@ -440,7 +446,7 @@ def preprocess_to_knn(train=True):
 def test():
     # npy average time 0.31s
     # c++ average time 0.08s 4 workers
-    batch_size = 3
+    batch_size = 2
     train_data_loader, val_data_loader = get_data_loader(batch_size, False)
     times = []
     tic = time.time()
