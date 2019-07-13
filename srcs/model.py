@@ -1,9 +1,13 @@
+import sys
+# sys.path.remove('/opt/ros/kinetic/lib/python2.7/dist-packages')
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 from utils import maskFOV_on_BEV
-
+#import sys
+#sys.path.remove('/opt/ros/kinetic/lib/python2.7/dist-packages')
 
 def conv3x3(in_planes, out_planes, stride=1, bias=False):
     """3x3 convolution with padding"""
@@ -482,7 +486,7 @@ class PIXOR(nn.Module):
         # x = x.permute(0, 3, 1, 2)
         # Torch Takes Tensor of shape (Batch_size, channels, height, width)
         features_iamge = self.resnet(y)
-        print (features_iamge.shape)
+        # print (features_iamge.shape)
 
         features = self.backbone(x, features_iamge, x2y, pc_diff)
         

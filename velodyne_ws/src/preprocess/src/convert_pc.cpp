@@ -50,8 +50,6 @@ void pcCallback (const sensor_msgs::PointCloud2ConstPtr& input){
   //std::cout<<"h";
   preprocess_pc(cloud);
 
-
-
 }
 
 int main(int argc, char** argv){ 

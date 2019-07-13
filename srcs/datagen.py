@@ -14,8 +14,9 @@ import cv2
 import calibration as calibration
 
 #KITTI_PATH = '/home/hqxie/0249/Data/kitti'
-#KITTI_PATH = '/home/hanqing.xie/DATA/kitti'
-KITTI_PATH = 'KITTI'
+KITTI_PATH = '/home/hywel/DataDisk/Kitti/object'
+# KITTI_PATH = '/home/hywel/DataDisk/lidar-image-gps-ahrs'
+#KITTI_PATH = 'KITTI'
 
 class KITTI(Dataset):
 
@@ -339,7 +340,7 @@ class KITTI(Dataset):
         
         try:
             import pcl
-            print ('itemindex', itemindex)
+            # print ('itemindex', itemindex)
             itemindex = itemindex.astype(np.float32)    
             pc_point = pcl.PointCloud(point)
             pc_center = pcl.PointCloud(itemindex)
@@ -347,9 +348,9 @@ class KITTI(Dataset):
             # find the single closest points to each point in point cloud 2
             # (and the sqr distances)
             indices, _ = kd.nearest_k_search_for_cloud(pc_center, k)
-            print ('indices', indices.shape)
-            print ('point', point.shape)
-            print ('center', center.shape)
+            # print ('indices', indices.shape)
+            # print ('point', point.shape)
+            # print ('center', center.shape)
             indices = np.reshape(indices, (-1))
             k_nearest = point[indices]
             
@@ -363,13 +364,30 @@ class KITTI(Dataset):
             k_dif = center - center
         return k_nearest_image, k_dif
 
-    
+
     def velo_to_image(self, calib, point):
         size = point.shape
         point = np.reshape(point, (-1,3))
         image, dis = calib.lidar_to_img(point)
         image = np.reshape(image, (size[0], size[1], size[2],size[3], 2))
         return image
+    
+    def raw_to_tensor(self, point, image):
+        calib = self.load_calib(0)
+        scan = self.lidar_preprocess(point)
+        bev2image, pc_diff = self.find_knn_image(calib, scan, point, k=1)
+
+        image = torch.from_numpy(image)
+        scan = torch.from_numpy(scan)
+        bev2image = torch.from_numpy(bev2image)
+        pc_diff = torch.from_numpy(pc_diff)
+        image = image.float()
+        bev2image = bev2image.float()
+        pc_diff = pc_diff.float()
+        image = image.permute(2, 0, 1)
+        scan = scan.permute(2, 0, 1)
+        return scan, image, bev2image, pc_diff
+
 
 
 def get_data_loader(batch_size, use_npy, geometry=None, frame_range=10000):

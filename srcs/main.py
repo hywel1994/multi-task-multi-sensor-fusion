@@ -59,6 +59,9 @@ def eval_batch(config, net, loss_fn, loader, device, eval_range='all'):
             tic = time.time()
             bev, image, bev2image, pc_diff, label_map, item = data
             bev = bev.to(device)
+            image = image.to(device)
+            bev2image = bev2image.to(device)
+            pc_diff = pc_diff.to(device)
             label_map = label_map.to(device)
             tac = time.time()
             predictions = net(bev, image, bev2image, pc_diff)
@@ -222,10 +225,12 @@ def train(exp_name, device):
 
         for bev, image, bev2image, pc_diff, label_map, item in train_data_loader:
             
-            tic = time.time()#print('step', step)
+            tic = time.time()
             bev = bev.to(device)
-            label_map = label_map.to(device)
             image = image.to(device)
+            bev2image = bev2image.to(device)
+            pc_diff = pc_diff.to(device)
+            label_map = label_map.to(device)
             # TODO
             optimizer.zero_grad()
 
@@ -252,7 +257,10 @@ def train(exp_name, device):
                 #    train_logger.histo_summary(tag + '/grad', value.grad.data.cpu().numpy(), step)
 
             step += 1
-            #print(time.time() - tic)            
+            print(time.time() - tic)        
+
+            if step==100:
+                break   
 
         # Record Training Loss
         train_loss = train_loss / len(train_data_loader)
@@ -285,17 +293,25 @@ def train(exp_name, device):
 def eval_one(net, loss_fn, config, loader, image_id, device, plot=False, verbose=False):
     bev, image, bev2image, pc_diff, label_map, image_id = loader.dataset[image_id]
     bev = bev.to(device)
+    image = image.to(device)
+    bev2image = bev2image.to(device)
+    pc_diff = pc_diff.to(device)
+    # label_map = label_map.to(device)
+
     label_map, label_list = loader.dataset.get_label(image_id)
     loader.dataset.reg_target_transform(label_map)
     label_map = torch.from_numpy(label_map).permute(2, 0, 1).unsqueeze_(0).to(device)
-
+    print ("bev: ",bev.shape)
+    print ("image: ",image.shape)
+    print ("bev2image: ",bev2image.shape)
+    print ("pc_diff: ",pc_diff.shape)
     # Forward Pass
     t_start = time.time()
     pred = net(bev.unsqueeze(0), image.unsqueeze(0), bev2image.unsqueeze(0), pc_diff.unsqueeze(0))
     t_forward = time.time() - t_start
 
     loss, cls_loss, loc_loss = loss_fn(pred, label_map)
-    pred.squeeze_(0)
+    pred.squeeze_(0)        
     cls_pred = pred[0, ...]
 
     if verbose:
@@ -318,7 +334,7 @@ def eval_one(net, loss_fn, config, loader, image_id, device, plot=False, verbose
     num_pred = len(scores)
     bev_np = bev.cpu().permute(1, 2, 0).numpy()
     pred_image = get_bev(bev_np, corners)
-
+    cls_pred = cls_pred.cpu()
     if plot == True:
         # Visualization
         plot_bev(bev_np, label_list, window_name='GT')
