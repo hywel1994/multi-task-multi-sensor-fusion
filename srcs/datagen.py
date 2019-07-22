@@ -28,6 +28,8 @@ class KITTI(Dataset):
         'H1': -2.5,
         'H2': 2.5,
         'interval': 0.15625,
+        'image_shape': (1240, 370),
+        'image_output': (310, 93),
         'input_shape': (512, 448, 33),
         'knn_shape': (256, 224, 16),
         'label_shape': (128, 112, 7)
@@ -112,7 +114,10 @@ class KITTI(Dataset):
         img_file = self.image[item]
         assert os.path.exists(img_file)
         image = cv2.imread(img_file)
-        image = cv2.resize(image, (1240, 370), interpolation=cv2.INTER_CUBIC)
+        # TODO need check, image_width and image_height
+        print ("before", image.size)
+        image = cv2.resize(image, self.geometry['image_shape'], interpolation=cv2.INTER_CUBIC)
+        print ("after", image.size)
         return image
     
     def load_calib(self, item):
@@ -120,6 +125,7 @@ class KITTI(Dataset):
         assert os.path.exists(calib_file)
         return calibration.Calibration(calib_file)
     
+    # Pedestrian 0.00 0 -0.20 712.40 143.00 810.73 307.92 1.89 0.48 1.20 1.84 1.47 8.41 0.01
     def interpret_kitti_label(self, bbox):
         w, h, l, y, z, x, yaw = bbox[8:15]
         y = -y
@@ -130,6 +136,14 @@ class KITTI(Dataset):
     def interpret_custom_label(self, bbox):
         w, l, x, y, yaw = bbox
         return x, y, w, l, yaw
+
+    def interpret_kitti_2D_label(self, bbox):
+        y1, x1, y2, x2 = bbox[4:8]
+        xc = (x1+x2)//2
+        yc = (y1+y2)//2
+        height = x2-x1
+        width = y2-y1
+        return xc, yc, height, width
 
     def get_corners(self, bbox):
 

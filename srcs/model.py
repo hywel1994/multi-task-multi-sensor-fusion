@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from utils import maskFOV_on_BEV
+from utils2d import _gather_feat, _tranpose_and_gather_feat
+
 #import sys
 #sys.path.remove('/opt/ros/kinetic/lib/python2.7/dist-packages')
 
@@ -169,15 +171,15 @@ class BevBackBone(nn.Module):
         return p3
     
     def bev_image_fusion(self, y, x2y, pc_diff):
-        # y: image feature map -1, 128, 93, 310
+        # y: image feature map -1, 128, 96, 312
         # x2y: knn input map -1, 256, 224, 16, k, 2
         # return: 256, 224, 256
-        assert list(y.size())[1:] == [128,93,310]
+        assert list(y.size())[1:] == [128,96,312]
         batch_size = y.size()[0]
         y = y.permute(0, 2, 3, 1)
         # TODO can be better
-        x2y[:,:,:,:,:,0] = torch.clamp(x2y[:,:,:,:,:,0], 0, 92)
-        x2y[:,:,:,:,:,1] = torch.clamp(x2y[:,:,:,:,:,1], 0, 309)
+        x2y[:,:,:,:,:,0] = torch.clamp(x2y[:,:,:,:,:,0], 0, 96)
+        x2y[:,:,:,:,:,1] = torch.clamp(x2y[:,:,:,:,:,1], 0, 312)
         x2y = torch.round(x2y)
         x2y = x2y.view(batch_size,-1,2)
         x2y = x2y.long()
@@ -248,6 +250,7 @@ class BevBackBone(nn.Module):
         _, _, H, W = y.size()
         return F.upsample(x, size=(H, W), mode='bilinear') + y
 
+
 class ImageBackBone(nn.Module):
 
     def __init__(self, block, num_block, use_bn=True):
@@ -270,15 +273,14 @@ class ImageBackBone(nn.Module):
         self.block4 = self._make_layer(block, 96, num_blocks=num_block[2])
         self.block5 = self._make_layer(block, 128, num_blocks=num_block[3])
 
-
         # Lateral layers
         self.latlayer1 = nn.Conv2d(512, 384, kernel_size=1, stride=1, padding=0)
         self.latlayer2 = nn.Conv2d(384, 256, kernel_size=1, stride=1, padding=0)
         self.latlayer3 = nn.Conv2d(256, 128 , kernel_size=1, stride=1, padding=0)
 
         # Top-down layers
-        self.deconv1 = nn.ConvTranspose2d(384, 256, kernel_size=3, stride=2, padding=1, output_padding=0)
-        self.deconv2 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=(0,1))
+        self.deconv1 = nn.ConvTranspose2d(384, 256, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.deconv2 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -290,6 +292,7 @@ class ImageBackBone(nn.Module):
         if self.use_bn:
             x = self.bn2(x)
         c1 = self.relu2(x)
+        #print ('x', x.shape)
 
         # bottom up layers
         c2 = self.block2(c1)
@@ -297,11 +300,18 @@ class ImageBackBone(nn.Module):
         c4 = self.block4(c3)
         c5 = self.block5(c4)
 
+        #print ('c1', c1.shape)
+        #print ('c3', c3.shape)
+        #print ('c5', c5.shape)
+
         l5 = self.latlayer1(c5)
         l4 = self.latlayer2(c4)
         p4 = l4 + self.deconv1(l5)
         l3 = self.latlayer3(c3)
         p3 = l3 + self.deconv2(p4)
+
+        #print ('p4', p4.shape)
+        #print ('p3', p3.shape)
 
         return p3
 
@@ -343,24 +353,62 @@ class ImageBackBone(nn.Module):
         _, _, H, W = y.size()
         return F.upsample(x, size=(H, W), mode='bilinear') + y
 
+
+class CTHeader2D(nn.Module):
+    def __init__(self, input_dim=128, head_conv=96, use_bn=True):
+        super(CTHeader2D, self).__init__()
+        self.use_bn = use_bn
+        bias = not use_bn
+        self.input_dim = input_dim
+        self.head_conv = head_conv
+
+        self.conv1 = conv3x3(self.input_dim, self.head_conv, bias=bias)
+        self.bn1 = nn.BatchNorm2d(self.head_conv)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(self.head_conv, self.head_conv, bias=bias)
+        self.bn2 = nn.BatchNorm2d(self.head_conv)
+        self.relu2 = nn.ReLU(inplace=True)
+
+        self.clshead = nn.Conv2d(self.head_conv, 1, kernel_size=1, stride=1, padding=0)
+        self.whhead = nn.Conv2d(self.head_conv, 2, kernel_size=1, stride=1, padding=0)
+    
+    def forward(self, x):
+        x = self.conv1(x)
+        if self.use_bn:
+            x = self.bn1(x)
+        x = self.relu1(x)
+        x = self.conv2(x)
+        if self.use_bn:
+            x = self.bn2(x)
+        x = self.relu2(x)
+
+        cls = torch.sigmoid(self.clshead(x))
+        wh = self.whhead(x)
+
+        return cls, wh
+
+
 class Header(nn.Module):
 
-    def __init__(self, use_bn=True):
+    def __init__(self, input_dim=96, head_conv=96, use_bn=True):
         super(Header, self).__init__()
 
         self.use_bn = use_bn
         bias = not use_bn
-        self.conv1 = conv3x3(96, 96, bias=bias)
-        self.bn1 = nn.BatchNorm2d(96)
-        self.conv2 = conv3x3(96, 96, bias=bias)
-        self.bn2 = nn.BatchNorm2d(96)
-        self.conv3 = conv3x3(96, 96, bias=bias)
-        self.bn3 = nn.BatchNorm2d(96)
-        self.conv4 = conv3x3(96, 96, bias=bias)
-        self.bn4 = nn.BatchNorm2d(96)
+        self.input_dim = input_dim
+        self.head_conv = head_conv
 
-        self.clshead = conv3x3(96, 1, bias=True)
-        self.reghead = conv3x3(96, 6, bias=True)
+        self.conv1 = conv3x3(self.input_dim, self.head_conv, bias=bias)
+        self.bn1 = nn.BatchNorm2d(self.head_conv)
+        self.conv2 = conv3x3(self.head_conv, self.head_conv, bias=bias)
+        self.bn2 = nn.BatchNorm2d(self.head_conv)
+        self.conv3 = conv3x3(self.head_conv, self.head_conv, bias=bias)
+        self.bn3 = nn.BatchNorm2d(self.head_conv)
+        self.conv4 = conv3x3(self.head_conv, self.head_conv, bias=bias)
+        self.bn4 = nn.BatchNorm2d(self.head_conv)
+
+        self.clshead = conv3x3(self.head_conv, 1, bias=True)
+        self.reghead = conv3x3(self.head_conv, 6, bias=True)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -380,6 +428,74 @@ class Header(nn.Module):
         reg = self.reghead(x)
 
         return cls, reg
+
+def _nms(heat, kernel=3):
+    pad = (kernel - 1) // 2
+
+    hmax = nn.functional.max_pool2d(
+        heat, (kernel, kernel), stride=1, padding=pad)
+    keep = (hmax == heat).float()
+    return heat * keep
+
+def _topk(scores, K=40):
+    batch, cat, height, width = scores.size()
+      
+    topk_scores, topk_inds = torch.topk(scores.view(batch, cat, -1), K)
+
+    topk_inds = topk_inds % (height * width)
+    topk_ys   = (topk_inds / width).int().float()
+    topk_xs   = (topk_inds % width).int().float()
+      
+    topk_score, topk_ind = torch.topk(topk_scores.view(batch, -1), K)
+    topk_clses = (topk_ind / K).int()
+    topk_inds = _gather_feat(
+        topk_inds.view(batch, -1, 1), topk_ind).view(batch, K)
+    topk_ys = _gather_feat(topk_ys.view(batch, -1, 1), topk_ind).view(batch, K)
+    topk_xs = _gather_feat(topk_xs.view(batch, -1, 1), topk_ind).view(batch, K)
+
+    return topk_score, topk_inds, topk_clses, topk_ys, topk_xs
+
+class Decoder2d(nn.Module):
+
+    def __init__(self, geom):
+        super(Decoder2d, self).__init__()
+        self.cat_spec_wh=False
+        self.K=100
+
+    def forward(self, heat, wh, reg=None):
+        batch, cat, height, width = heat.size()
+
+        # heat = torch.sigmoid(heat)
+        # perform nms on heatmaps
+        heat = _nms(heat)
+        
+        scores, inds, clses, ys, xs = _topk(heat, K=self.K)
+        if reg is not None:
+            reg = _tranpose_and_gather_feat(reg, inds)
+            reg = reg.view(batch, self.K, 2)
+            xs = xs.view(batch, self.K, 1) + reg[:, :, 0:1]
+            ys = ys.view(batch, self.K, 1) + reg[:, :, 1:2]
+        else:
+            xs = xs.view(batch, self.K, 1) + 0.5
+            ys = ys.view(batch, self.K, 1) + 0.5
+        
+        wh = _tranpose_and_gather_feat(wh, inds)
+        print ("wh", wh.shape)
+        if self.cat_spec_wh:
+            wh = wh.view(batch, self.K, cat, 2)
+            clses_ind = clses.view(batch, self.K, 1, 1).expand(batch, self.K, 1, 2).long()
+            wh = wh.gather(2, clses_ind).view(batch, self.K, 2)
+        else:
+            wh = wh.view(batch, self.K, 2)
+            clses  = clses.view(batch, self.K, 1).float()
+            scores = scores.view(batch, self.K, 1)
+            bboxes = torch.cat([xs - wh[..., 0:1] / 2, 
+                                ys - wh[..., 1:2] / 2,
+                                xs + wh[..., 0:1] / 2, 
+                                ys + wh[..., 1:2] / 2], dim=2)
+        detections = torch.cat([bboxes, scores, clses], dim=2)
+        
+        return detections
 
 class Decoder(nn.Module):
 
@@ -452,8 +568,10 @@ class PIXOR(nn.Module):
         self.backbone = BevBackBone(Bottleneck, [2, 2, 2, 2], geom, use_bn)
         self.resnet = ImageBackBone(Bottleneck, [2, 2, 2, 2], use_bn)
         
-        self.header = Header(use_bn)
+        self.header = Header(use_bn=use_bn)
+        self.header_2d = CTHeader2D(use_bn=use_bn)
         self.corner_decoder = Decoder(geom)
+        self.corner_decoder_2d = Decoder2d(geom)
         self.use_decode = decode
         self.cam_fov_mask = maskFOV_on_BEV(geom['label_shape'])
         
@@ -486,24 +604,30 @@ class PIXOR(nn.Module):
         # x = x.permute(0, 3, 1, 2)
         # Torch Takes Tensor of shape (Batch_size, channels, height, width)
         features_iamge = self.resnet(y)
-        # print (features_iamge.shape)
-
-        features = self.backbone(x, features_iamge, x2y, pc_diff)
+        # print ("features_iamge: ", features_iamge.shape)
+        cls2d, reg2d = self.header_2d(features_iamge)
         
+        features = self.backbone(x, features_iamge, x2y, pc_diff)
+        # print ("features: ", features.shape)
+
         cls, reg = self.header(features)
         self.cam_fov_mask = self.cam_fov_mask.to(device)
         cls = cls * self.cam_fov_mask
         if self.use_decode:
             decoded = self.corner_decoder(reg)
+            # decoded2d = self.corner_decoder_2d(cls2d, reg2d)
             # Return tensor(Batch_size, height, width, channels)
             #decoded = decoded.permute(0, 2, 3, 1)
             #cls = cls.permute(0, 2, 3, 1)
             #reg = reg.permute(0, 2, 3, 1)
+            # print ("decoded2d", decoded2d.shape)
             pred = torch.cat([cls, reg, decoded], dim=1)
+            pred2d = torch.cat([cls2d, reg2d], dim=1)
         else:
             pred = torch.cat([cls, reg], dim=1)
+            pred2d = torch.cat([cls2d, reg2d], dim=1)
 
-        return pred
+        return pred, pred2d
 
 def test_decoder(decode = True):
     geom = {
@@ -522,13 +646,14 @@ def test_decoder(decode = True):
     print("Testing PIXOR decoder")
     net = PIXOR(geom, use_bn=False)
     net.set_decode(decode)
-    preds = net(torch.autograd.Variable(torch.randn(2, 33, 512, 448)), 
-                                        torch.autograd.Variable(torch.randn(2, 3, 370, 1240)), 
+    preds, preds2d = net(torch.autograd.Variable(torch.randn(2, 33, 512, 448)), 
+                                        torch.autograd.Variable(torch.randn(2, 3, 384, 1248)), 
                                         torch.autograd.Variable(torch.randn(2, 256, 224, 16, 2,2)), 
                                         torch.autograd.Variable(torch.randn(2, 256, 224, 16, 2, 3)))
     print(net)
 
-    print("Predictions output size", preds.size())
+    print("Predictions 3d output size", preds.size())
+    print("Predictions 2d output size", preds2d.size())
 
 if __name__ == "__main__":
     test_decoder()

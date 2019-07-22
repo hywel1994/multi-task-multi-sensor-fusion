@@ -17,7 +17,7 @@ from loss import CustomLoss
 from utils import get_model_name, load_config, get_logger, plot_bev, plot_label_map, plot_pr_curve, get_bev
 from model import PIXOR
 from datagen import KITTI
-from postprocess import filter_pred, compute_matches, compute_ap
+from postprocess import filter_pred, compute_matches, compute_ap, non_max_suppression
 
 def build_model(config, device, train=True):
     net = PIXOR(config['geometry'], config['use_bn'])
@@ -45,15 +45,16 @@ class synchronizer:
         # self.pub_Image = rospy.Publisher('image_raw_sync', SesnorImage, queue_size=1)
         # self.pub_Cam_Info = rospy.Publisher('camera_info_sync', CameraInfo, queue_size=1)
         # self.pub_Lidar = rospy.Publisher('rslidar_points_sync', PointCloud2, queue_size=1)
-        config, _, _, _ = load_config("default")
-        self.net, _ = build_model(config, "cuda", train=False)
-        self.net.load_state_dict(torch.load(get_model_name(config), map_location="cuda"))
+        self.config, _, _, _ = load_config("default")
+        self.net, _ = build_model(self.config, "cuda", train=False)
+        self.net.load_state_dict(torch.load(get_model_name(self.config), map_location="cuda"))
         self.net.set_decode(True)
         self.net.eval()
 
         self.dataset = KITTI(1000)
         self.dataset.load_velo()
 
+        self.image_pub = rospy.Publisher("/test/bev_prev", Image, queue_size=2)
 
         self.imageInput = message_filters.Subscriber("/pointgrey/image_raw", Image)
         self.lidar = message_filters.Subscriber('/velo/pointcloud', PointCloud2)
@@ -85,9 +86,20 @@ class synchronizer:
         print ("cv_image: ", type(cv_image))
         # TODO
         cv_image = np.resize(cv_image,(370,1240,3))
-        self.one_test(cv_image, points)
-
+        pred, bev = self.one_test(cv_image, points)
         print ('4: ', time.time()-date)
+
+        corners, scores = filter_pred(self.config, pred)
+        input_np = bev.permute(1, 2, 0).cpu().numpy()
+        pred_bev = get_bev(input_np, corners)
+
+        pub_image = CvBridge().cv2_to_imgmsg(pred_bev, "bgr8")
+        pub_image.header.frame_id = image_raw.header.frame_id
+        pub_image.header.stamp = image_raw.header.stamp
+
+        print ('5: ', time.time()-date)
+
+        self.image_pub.publish(pub_image)
 
     
     def one_test(self, image_raw, lidar_points):
@@ -108,8 +120,8 @@ class synchronizer:
         # pc_diff = torch.ones(256, 224, 16, 1, 3).cuda()
 
         pred = self.net(bev.unsqueeze(0), image.unsqueeze(0), bev2image.unsqueeze(0), pc_diff.unsqueeze(0))
-
         # print (pred)
+        return pred, bev
 
 
     # def publisher(self):
