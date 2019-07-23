@@ -25,10 +25,10 @@ extern "C"
 	const float y_MIN =-40.0;
 	const float y_MAX = 40.0;
 	const float z_MIN = -2.5; // -0.4	////TODO : to be determined ....
-	const float z_MAX = 2.5; // 2
-	const float x_DIVISION = 0.15625;
-	const float y_DIVISION = 0.15625;
-	const float z_DIVISION = 0.15625;	// was 0.2 originally
+	const float z_MAX = 1; // 2
+	const float x_DIVISION = 0.1;
+	const float y_DIVISION = 0.1;
+	const float z_DIVISION = 0.1;	// was 0.2 originally
 
 	int X_SIZE = (int)((x_MAX-x_MIN)/x_DIVISION);	// X_SIZE is 700
 	int Y_SIZE = (int)((y_MAX-y_MIN)/y_DIVISION);   // Y_SIZE is 800

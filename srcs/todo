@@ -1,0 +1,12 @@
+datagen.py
+labelmap is based on label space
+
+add image labelmap (not center net)
+
+model 
+
+loss
+2d detection loss
+
+eval
+2d detection eval

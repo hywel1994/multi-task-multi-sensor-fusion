@@ -4,13 +4,16 @@ Load pointcloud/labels from the KITTI dataset folder
 import os.path
 import numpy as np
 import time
-import torch
+import math
+import cv2
 import ctypes
-from utils import plot_bev, get_points_in_a_rotated_box, plot_label_map, trasform_label2metric
+
+import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-import cv2
 
+from utils import plot_bev, get_points_in_a_rotated_box, plot_label_map, trasform_label2metric
+from utils2d import gaussian_radius, draw_umich_gaussian, draw_msra_gaussian, draw_gaussian
 import calibration as calibration
 
 #KITTI_PATH = '/home/hqxie/0249/Data/kitti'
@@ -26,15 +29,16 @@ class KITTI(Dataset):
         'W1': 0.0,
         'W2': 70.0,
         'H1': -2.5,
-        'H2': 2.5,
-        'interval': 0.15625,
-        'image_shape': (1240, 370),
-        'image_output': (310, 93),
-        'input_shape': (512, 448, 33),
-        'knn_shape': (256, 224, 16),
-        'label_shape': (128, 112, 7)
+        'H2': 1.1,
+        'interval': 0.1,
+        'image_input_shape': (384, 1248),
+        'image_label_shape': (96, 312),
+        'lidar_input_shape': (800, 700, 37),
+        'knn_shape': (400, 350, 18),
+        'lidar_label_shape': (200, 175, 7)
     }
 
+    # height, width
     target_mean = np.array([0.008, 0.001, 0.202, 0.2, 0.43, 1.368])
     target_std_dev = np.array([0.866, 0.5, 0.954, 0.668, 0.09, 0.111])
 
@@ -47,6 +51,7 @@ class KITTI(Dataset):
         self.image_sets = self.load_imageset(train) # names
         self.image = []
         self.calib = []
+        self.max_objs = 50
 
     def __len__(self):
         return len(self.image_sets)
@@ -58,9 +63,9 @@ class KITTI(Dataset):
         scan = self.load_velo_scan(item)
         bev2image, pc_diff = self.find_knn_image(calib, scan, point, k=1)
 
-        label_map, _ = self.get_label(item)
+        label_map, _ , image_label= self.get_label(item)
         self.reg_target_transform(label_map)
-
+    
         image = torch.from_numpy(image)
         scan = torch.from_numpy(scan)
         bev2image = torch.from_numpy(bev2image)
@@ -72,7 +77,12 @@ class KITTI(Dataset):
         image = image.permute(2, 0, 1)
         scan = scan.permute(2, 0, 1)
         label_map = label_map.permute(2, 0, 1)
-        return scan, image, bev2image, pc_diff, label_map, item
+
+        for key in image_label.keys():
+            image_label[key] = torch.from_numpy(image_label[key])
+            image_label[key] = image_label[key].float()
+
+        return scan, image, bev2image, pc_diff, label_map, image_label, item
 
     def reg_target_transform(self, label_map):
         '''
@@ -139,14 +149,20 @@ class KITTI(Dataset):
 
     def interpret_kitti_2D_label(self, bbox):
         y1, x1, y2, x2 = bbox[4:8]
-        xc = (x1+x2)//2
-        yc = (y1+y2)//2
+        return y1, x1, y2, x2
+    
+    def get_corners_2d(self, bbox):
+        y1, x1, y2, x2 = bbox[4:8]
+        xc = (x1+x2)/2
+        yc = (y1+y2)/2
         height = x2-x1
         width = y2-y1
-        return xc, yc, height, width
+
+        reg_target = [xc, yc, height, width]
+        return reg_target
 
     def get_corners(self, bbox):
-
+        # base velo cord
         w, h, l, y, z, x, yaw = bbox[8:15]
         y = -y
         # manually take a negative s. t. it's a right-hand system, with
@@ -178,16 +194,25 @@ class KITTI(Dataset):
         reg_target = [np.cos(yaw), np.sin(yaw), x, y, w, l]
 
         return bev_corners, reg_target
+    
+    # def update_image_label_map(self, map, reg_target):
+    #     label_x = reg_target[0]//4
+    #     label_y = reg_target[1]//4
+    #     map[label_x, label_y, 0] = 1.0
+    #     reg_x = reg_target[0] - reg_target[0]//4*4
+    #     reg_y = reg_target[1] - reg_target[1]//4*4
+    #     map[label_x, label_y, 1:5] = [reg_target[2], reg_target[3], reg_x, reg_y]
 
     def update_label_map(self, map, bev_corners, reg_target):
         label_corners = (bev_corners / 4 ) / self.geometry['interval']
-        label_corners[:, 1] += self.geometry['label_shape'][0] / 2
+        label_corners[:, 1] += self.geometry['lidar_label_shape'][0] / 2
 
-        points = get_points_in_a_rotated_box(label_corners, self.geometry['label_shape'])
+        points = get_points_in_a_rotated_box(label_corners, self.geometry['lidar_label_shape'])
 
         for p in points:
             label_x = p[0]
             label_y = p[1]
+            # TODO can be better. output ans is in metric space. But in label map space is better
             metric_x, metric_y = trasform_label2metric(np.array(p))
             actual_reg_target = np.copy(reg_target)
             actual_reg_target[2] = reg_target[2] - metric_x
@@ -197,6 +222,24 @@ class KITTI(Dataset):
 
             map[label_y, label_x, 0] = 1.0
             map[label_y, label_x, 1:7] = actual_reg_target
+    
+    def update_image_label(self, hm, wh, reg, ind, reg_mask, gt_det, k, cls_id, reg_target):
+        xc, yc, h, w = reg_target
+        if h > 0 and w > 0:
+            radius = gaussian_radius((math.ceil(h), math.ceil(w)))
+            radius = max(0, int(radius))
+
+            ct = np.array([xc, yc], dtype=np.float32)
+            ct_int = ct.astype(np.int32)
+            draw_gaussian(hm[cls_id], ct_int, radius)
+            wh[k] = 1. * w, 1. * h
+            ind[k] = ct_int[1] * self.geometry['image_label_shape'][1] + ct_int[0]
+            reg[k] = ct - ct_int
+            reg_mask[k] = 1
+            
+            gt_det.append([ct[0] - w / 2, ct[1] - h / 2, 
+                        ct[0] + w / 2, ct[1] + h / 2, 1, cls_id])
+    
 
     def get_label(self, index):
         '''
@@ -216,11 +259,20 @@ class KITTI(Dataset):
         label_path = os.path.join(KITTI_PATH, 'training', 'label_2', f_name)
 
         object_list = {'Car': 1, 'Truck':0, 'DontCare':0, 'Van':0, 'Tram':0}
-        label_map = np.zeros(self.geometry['label_shape'], dtype=np.float32)
+        label_map = np.zeros(self.geometry['lidar_label_shape'], dtype=np.float32)
         label_list = []
+
+        hm = np.zeros((1, *self.geometry['image_label_shape'][0:2]), dtype=np.float32)
+        wh = np.zeros((self.max_objs, 2), dtype=np.float32)
+        #dense_wh = np.zeros((2, *self.geometry['image_label_shape'][0:2]), dtype=np.float32)
+        reg = np.zeros((self.max_objs, 2), dtype=np.float32)
+        ind = np.zeros((self.max_objs), dtype=np.int64)
+        reg_mask = np.zeros((self.max_objs), dtype=np.uint8)
+        gt_det = []
+
         with open(label_path, 'r') as f:
             lines = f.readlines() # get rid of \n symbol
-            for line in lines:
+            for k, line in enumerate(lines):
                 bbox = []
                 entry = line.split(' ')
                 name = entry[0]
@@ -231,7 +283,11 @@ class KITTI(Dataset):
                         corners, reg_target = self.get_corners(bbox)
                         self.update_label_map(label_map, corners, reg_target)
                         label_list.append(corners)
-        return label_map, label_list
+
+                        reg_target_2d = self.get_corners_2d(bbox)
+                        self.update_image_label(hm, wh, reg, ind, reg_mask, gt_det, k, 0, reg_target_2d)
+        image_label = {'hm': hm, 'wh': wh, 'reg':reg, 'ind': ind, 'reg_mask': reg_mask, 'gt_det': gt_det}
+        return label_map, label_list, image_label
 
     def get_rand_velo(self):
         import random
@@ -247,7 +303,7 @@ class KITTI(Dataset):
             scan = np.load(filename[:-4]+'.npy')
         else:
             c_name = bytes(filename, 'utf-8')
-            scan = np.zeros(self.geometry['input_shape'], dtype=np.float32)
+            scan = np.zeros(self.geometry['lidar_input_shape'], dtype=np.float32)
             c_data = ctypes.c_void_p(scan.ctypes.data)
             self.LidarLib.createTopViewMaps(c_data, c_name)
             #scan = np.fromfile(filename, dtype=np.float32).reshape(-1, 4)
@@ -302,7 +358,7 @@ class KITTI(Dataset):
 
     def lidar_preprocess(self, scan):
         # TODO 
-        velo_processed = np.zeros(self.geometry['input_shape'], dtype=np.float32)
+        velo_processed = np.zeros(self.geometry['lidar_input_shape'], dtype=np.float32)
         intensity_map_count = np.zeros((velo_processed.shape[0], velo_processed.shape[1]))
         velo = self.passthrough(scan)
         for i in range(velo.shape[0]):
@@ -317,7 +373,7 @@ class KITTI(Dataset):
         return velo_processed
     
     def bev_to_velo(self, x, y, z):
-        scales = self.geometry['input_shape'][0]/self.geometry['knn_shape'][0]
+        scales = self.geometry['lidar_input_shape'][0]/self.geometry['knn_shape'][0]
         l = (scales*x+0.5)*self.geometry['interval'] + self.geometry['L1']
         w = (scales*y+0.5)*self.geometry['interval'] + self.geometry['W1']
         h = (scales*z+0.5)*self.geometry['interval'] + self.geometry['H1']
@@ -327,7 +383,7 @@ class KITTI(Dataset):
         return y*(self.geometry['knn_shape'][0]*self.geometry['knn_shape'][2])+x*self.geometry['knn_shape'][2]+z
     
     def cal_index_velo(self, w, l ,h):
-        scales = self.geometry['input_shape'][0]/self.geometry['knn_shape'][0]
+        scales = self.geometry['lidar_input_shape'][0]/self.geometry['knn_shape'][0]
         x = round(((l-self.geometry['L1']) / self.geometry['interval']-0.5)/scales)
         y = round(((w-self.geometry['W1']) / self.geometry['interval']-0.5)/scales)
         z = round(((h-self.geometry['H1']) / self.geometry['interval']-0.5)/scales)
@@ -341,7 +397,7 @@ class KITTI(Dataset):
         itemindex = np.argwhere(center==0)
         itemindex = itemindex.astype(np.float32)
         
-        scales = self.geometry['input_shape'][0]/self.geometry['knn_shape'][0]
+        scales = self.geometry['lidar_input_shape'][0]/self.geometry['knn_shape'][0]
         itemindex[:,0] = (scales*itemindex[:,0]+0.5)*self.geometry['interval'] + self.geometry['L1']
         itemindex[:,1] = (scales*itemindex[:,1]+0.5)*self.geometry['interval'] + self.geometry['W1']
         itemindex[:,2] = (scales*itemindex[:,2]+0.5)*self.geometry['interval'] + self.geometry['H1']

@@ -7,7 +7,7 @@ import random
 from torch.multiprocessing import Pool
 import os
 
-from loss import CustomLoss
+from loss import CustomLoss, CtdetLoss
 from datagen import get_data_loader
 from model import PIXOR
 from utils import get_model_name, load_config, get_logger, plot_bev, plot_label_map, plot_pr_curve, get_bev
@@ -17,6 +17,7 @@ from postprocess import filter_pred, compute_matches, compute_ap
 def build_model(config, device, train=True):
     net = PIXOR(config['geometry'], config['use_bn'])
     loss_fn = CustomLoss(device, config, num_classes=1)
+    loss_2d_fn = CtdetLoss()
 
     if torch.cuda.device_count() <= 1:
         config['mGPUs'] = False
@@ -26,13 +27,14 @@ def build_model(config, device, train=True):
 
     net = net.to(device)
     loss_fn = loss_fn.to(device)
+    loss_2d_fn = loss_2d_fn.to(device)
     if not train:
-        return net, loss_fn
+        return net, loss_fn, loss_2d_fn
 
     optimizer = torch.optim.SGD(net.parameters(), lr=config['learning_rate'], momentum=config['momentum'], weight_decay=config['weight_decay'])
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=config['lr_decay_at'], gamma=0.1)
 
-    return net, loss_fn, optimizer, scheduler
+    return net, loss_fn, loss_2d_fn, optimizer, scheduler
 
 
 def eval_batch(config, net, loss_fn, loader, device, eval_range='all'):
@@ -64,7 +66,7 @@ def eval_batch(config, net, loss_fn, loader, device, eval_range='all'):
             pc_diff = pc_diff.to(device)
             label_map = label_map.to(device)
             tac = time.time()
-            predictions = net(bev, image, bev2image, pc_diff)
+            predictions, predictions2d = net(bev, image, bev2image, pc_diff)
             t_fwd += time.time() - tac
             loss, cls, loc = loss_fn(predictions, label_map)
             cls_loss += cls
@@ -189,7 +191,7 @@ def train(exp_name, device):
     train_data_loader, test_data_loader = get_data_loader(batch_size, config['use_npy'],
                                         geometry=config['geometry'], frame_range=config['frame_range'])
     # Model
-    net, loss_fn, optimizer, scheduler = build_model(config, device, train=True)
+    net, loss_fn, loss_2d_fn, optimizer, scheduler = build_model(config, device, train=True)
 
     # Tensorboard Logger
     train_logger = get_logger(config, 'train')
@@ -223,7 +225,7 @@ def train(exp_name, device):
             net.set_decode(False)
         scheduler.step()
 
-        for bev, image, bev2image, pc_diff, label_map, item in train_data_loader:
+        for bev, image, bev2image, pc_diff, label_map, image_label, item in train_data_loader:
             
             tic = time.time()
             bev = bev.to(device)
@@ -231,13 +233,17 @@ def train(exp_name, device):
             bev2image = bev2image.to(device)
             pc_diff = pc_diff.to(device)
             label_map = label_map.to(device)
+            for key in image_label.keys():
+                image_label[key] = image_label[key].to(device)
             # TODO
             optimizer.zero_grad()
 
             # Forward
-            predictions = net(bev, image, bev2image, pc_diff)
+            predictions, predictions2d = net(bev, image, bev2image, pc_diff)
             loss, cls, loc = loss_fn(predictions, label_map)
+            loss_2d, loss_stats = loss_2d_fn(predictions2d, image_label)
             loss.backward()
+            loss_2d.backward()
             optimizer.step()
             cls_loss += cls
             loc_loss += loc
@@ -260,7 +266,7 @@ def train(exp_name, device):
             print(time.time() - tic)        
 
             if step==100:
-                break   
+                break
 
         # Record Training Loss
         train_loss = train_loss / len(train_data_loader)
@@ -307,7 +313,7 @@ def eval_one(net, loss_fn, config, loader, image_id, device, plot=False, verbose
     print ("pc_diff: ",pc_diff.shape)
     # Forward Pass
     t_start = time.time()
-    pred = net(bev.unsqueeze(0), image.unsqueeze(0), bev2image.unsqueeze(0), pc_diff.unsqueeze(0))
+    pred, predictions2d = net(bev.unsqueeze(0), image.unsqueeze(0), bev2image.unsqueeze(0), pc_diff.unsqueeze(0))
     t_forward = time.time() - t_start
 
     loss, cls_loss, loc_loss = loss_fn(pred, label_map)
@@ -346,7 +352,7 @@ def eval_one(net, loss_fn, config, loader, image_id, device, plot=False, verbose
 
 def experiment(exp_name, device, eval_range='all', plot=True):
     config, _, _, _ = load_config(exp_name)
-    net, loss_fn = build_model(config, device, train=False)
+    net, loss_fn, loss_2d_fn = build_model(config, device, train=False)
     state_dict = torch.load(get_model_name(config), map_location=device)
     if config['mGPUs']:
         net.module.load_state_dict(state_dict)
@@ -376,7 +382,7 @@ def experiment(exp_name, device, eval_range='all', plot=True):
 
 def test(exp_name, device, image_id):
     config, _, _, _ = load_config(exp_name)
-    net, loss_fn = build_model(config, device, train=False)
+    net, loss_fn, loss_2d_fn = build_model(config, device, train=False)
     net.load_state_dict(torch.load(get_model_name(config), map_location=device))
     net.set_decode(True)
     train_loader, val_loader = get_data_loader(1, config['use_npy'], geometry=config['geometry'],
